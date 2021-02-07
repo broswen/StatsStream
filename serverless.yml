@@ -1,0 +1,100 @@
+service: statsstream
+frameworkVersion: '2'
+
+provider:
+  name: aws
+  timeout: 3
+  memorySize: 128
+  runtime: nodejs12.x
+  lambdaHashingVersion: 20201221
+
+  stage: dev
+  region: us-east-1
+
+  iamManagedPolicies:
+    - arn:aws:iam::aws:policy/service-role/AWSLambdaKinesisExecutionRole
+    - arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole
+
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+      Resource:
+        - !GetAtt StatsTable.Arn
+    - Effect: "Allow"
+      Action:
+        - sqs:SendMessage
+      Resource:
+        - !GetAtt RewardsQueue.Arn
+
+  environment:
+    STATS_TABLE: !Ref StatsTable
+    REW_QUEUE: !Ref RewardsQueue
+
+functions:
+  EventStreamConsumer:
+    handler: src/lambdas/EventStreamConsumer.handler
+  TableStreamConsumer:
+    handler: src/lambdas/TableStreamConsumer.handler
+
+
+# you can add CloudFormation resource templates here
+resources:
+  Resources:
+    StatsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-stats-table
+        BillingMode: PAY_PER_REQUEST
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        AttributeDefinitions:
+          - AttributeName: PK
+            AttributeType: S
+          - AttributeName: SK
+            AttributeType: S
+        KeySchema:
+          - AttributeName: PK
+            KeyType: HASH
+          - AttributeName: SK
+            KeyType: RANGE
+
+    TableEventSourceMapping:
+      Type: AWS::Lambda::EventSourceMapping
+      Properties:
+        StartingPosition: LATEST
+        EventSourceArn: !GetAtt StatsTable.StreamArn
+        FunctionName: !GetAtt TableStreamConsumerLambdaFunction.Arn
+        MaximumRetryAttempts: 1
+    
+    EventStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        ShardCount: 1
+        Name: ${self:service}-${self:provider.stage}-event-stream
+
+    StreamConsumer:
+      Type: AWS::Kinesis::StreamConsumer
+      Properties:
+        ConsumerName: ${self:service}-${self:provider.stage}-event-stream-consumer
+        StreamARN: !GetAtt EventStream.Arn
+
+    EventSourceMapping:
+      Type: AWS::Lambda::EventSourceMapping
+      Properties:
+        StartingPosition: LATEST
+        FunctionName: !GetAtt EventStreamConsumerLambdaFunction.Arn
+        EventSourceArn: !Ref StreamConsumer
+        MaximumRetryAttempts: 1
+
+    RewardsQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-rewards-queue
+
+    EventStreamDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${self:provider.stage}-event-stream-dlq
